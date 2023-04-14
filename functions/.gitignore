@@ -10,3 +10,4 @@ node_modules/
 
 .tool-versions
 .env
+service-account-key.json
