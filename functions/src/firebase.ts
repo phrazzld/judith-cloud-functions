@@ -3,7 +3,7 @@ import prodServiceAccount from "../service-account-key-prod.json";
 import stagingServiceAccount from "../service-account-key-staging.json";
 
 const serviceAccount =
-  process.env.NODE_ENV === "production"
+  process.env.GCLOUD_PROJECT === "judith-beck"
     ? prodServiceAccount
     : stagingServiceAccount;
 
