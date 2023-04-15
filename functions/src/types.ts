@@ -1,3 +1,4 @@
+
 export interface OpenAIChatMessage {
   role: string;
   content: string;
@@ -14,4 +15,12 @@ export interface OpenAIApiResponse {
       },
     ];
   };
+}
+
+export interface Memory {
+  memoryType: "judithReflection" | "judithMessage" | "userMessage";
+  memory: string;
+  embedding: number[];
+  // TODO: Properly type createdAt
+  createdAt: any;
 }
