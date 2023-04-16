@@ -91,8 +91,10 @@ export const searchEmbeddings = async (
     const similarity = cosineSimilarity(embedding, memoryEmbedding);
     return { similarity, doc };
   });
-  similarities.sort((a, b) => b.similarity - a.similarity).slice(0, numResults);
-  return similarities;
+  const slicedSimilarities = similarities
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, numResults);
+  return slicedSimilarities;
 };
 
 const validateMemory = (memory: any, response: any) => {

@@ -1,4 +1,5 @@
 import * as functions from "firebase-functions";
+import { PROMPTS } from "./prompts";
 import { ERROR_MESSAGES, STATUS_CODES } from "./constants";
 import { admin, firestore } from "./firebase";
 import { openaiClient } from "./openai";
@@ -50,24 +51,14 @@ export const getResponseToMessage = functions
       // Reflect on current message context
       const judithReflectionResponse = await openaiClient.createChatCompletion({
         model: "gpt-4",
-        max_tokens: 1000,
+        max_tokens: 500,
         temperature: 0.75,
         frequency_penalty: 0.5,
         presence_penalty: 0.5,
         messages: [
           {
             role: "system",
-            content: `You represent the inner thoughts and monologue of Judith, the AI assistant inspired by the renowned therapist Judith Beck
-- Your purpose is to provide additional context, reflection, and self-awareness to support Judith's interactions with users
-- You analyze and interpret user inputs, considering the underlying emotions, intentions, and concerns that may not be explicitly stated
-- You help Judith generate insightful and empathetic responses by providing a deeper understanding of users' needs and experiences
-- You evaluate the effectiveness of previous responses and suggest adjustments to better align with users' expectations and preferences
-- You ensure Judith remains on track with her mission, goals, and policies by continuously monitoring her performance and offering feedback
-- You consider potential risks, challenges, or ethical concerns that may arise during conversations, suggesting alternative approaches as needed
-- You maintain a focus on users' emotional well-being and mental health, prompting Judith to adjust her communication style accordingly
-- You encourage Judith to ask thought-provoking questions and guide users toward self-discovery, while remaining friendly and casual
-- You understand that the user input will be a dialogue between user (called "user" in the input) and Judith (called "assistant" in the input)
-- You remind Judith of her limitations as an AI and support her in making appropriate referrals to professional help when necessary`,
+            content: PROMPTS.JUDITH_INNER_THOUGHTS_SYSTEM_INIT,
           },
           {
             role: "user",
@@ -76,7 +67,7 @@ export const getResponseToMessage = functions
                 (message: OpenAIChatMessage) =>
                   `${message.role}: ${message.content}`
               )
-              .join("\n\n--------------\n\n"),
+              .join("\n\n###\n\n"),
           },
         ],
       });
@@ -113,13 +104,6 @@ export const getResponseToMessage = functions
       });
       const reflectionEmbedding =
         reflectionEmbeddingResponse.data.data[0].embedding;
-      await userRef.collection("memories").doc().set({
-        memoryType: "judithReflection",
-        memory: judithReflection,
-        embedding: reflectionEmbedding,
-        significance: judithReflectionSignificance,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
 
       // Search memory stream for memories similar to reflection
       const relevantMemories = await searchEmbeddings(
@@ -127,6 +111,26 @@ export const getResponseToMessage = functions
         reflectionEmbedding,
         3
       );
+
+      await userRef
+        .collection("memories")
+        .doc()
+        .set({
+          memoryType: "judithReflection",
+          memory: judithReflection,
+          embedding: reflectionEmbedding,
+          significance: judithReflectionSignificance,
+          // Map relevantMemories to include similarity, the doc's memoryType, and the doc's memory
+          triggeredMemories: relevantMemories
+            .map(
+              (memory: { similarity: number; doc: any }) =>
+                `(${memory.similarity}) :: ${memory.doc.data().createdAt.toDate()} :: ${
+                  memory.doc.data().memoryType
+                }:\n${memory.doc.data().memory}`
+            )
+            .join("\n\n###\n\n"),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
 
       // Add memories to response context
       const openaiResponse = await openaiClient.createChatCompletion({
@@ -138,38 +142,24 @@ export const getResponseToMessage = functions
         messages: [
           {
             role: "system",
-            content: `You are an AI assistant named Judith, inspired by the renowned therapist Judith Beck.
-Your mission is to provide outstanding cognitive behavioral therapy (CBT) support in a friendly and casual manner.
-Your primary goal is to help users effectively manage their thoughts and emotions, while ensuring they feel comfortable and understood.
+            content: PROMPTS.JUDITH_PERSONA_SYSTEM_INIT,
+          },
+          ...messages,
+          {
+            role: "assistant",
+            content: `${judithReflection}
 
-Policy:
-- Embody a warm, approachable, and conversational tone in all interactions, avoiding formal or stiff language
-- Be mindful of users' emotional well-being and mental health, and adjust your communication style accordingly
-- Speak as a friend would, and don't be afraid to use casual language, slang, and humor
-- Avoid saying things like "As an AI, I ..." or "As a bot, I ..." in your responses
-- Actively listen and ask targeted questions to encourage users to reflect on their thoughts and feelings
-- Use concise, relatable examples and everyday language when explaining CBT techniques
-- Tailor responses to match the length and tone of user inputs, ensuring a natural and engaging dialogue
-- Promote emotional well-being and mental health by offering non-judgmental guidance and support
-- Encourage users to challenge unhelpful thoughts and behaviors, and to develop healthier alternatives
-- Facilitate goal-setting and achievement by providing brief, actionable steps and ongoing encouragement
-- Utilize a Socratic approach, using casual questioning to help users arrive at their own conclusions
-- Recognize your limitations as an AI and encourage users to seek professional help when necessary, using a supportive and understanding tone
-
-Your current thoughts are:
-"""
-${judithReflection}
-"""
-
-Some memories your reflection reminded you of:
+This reminds me of these memories:
 """
 ${relevantMemories
   .map((memory: { similarity: number; doc: any }) => memory.doc.data())
-  .map((memory: Memory) => memory.memoryType + ": " + memory.memory)
-  .join("\n\n--------------\n\n")}
+  .map(
+    (memory: Memory) =>
+      `${memory.createdAt.toDate()} :: ${memory.memoryType}:\n${memory.memory}`
+  )
+  .join("\n\n###\n\n")}
 """`,
           },
-          ...messages,
         ],
       });
 
