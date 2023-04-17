@@ -12,6 +12,7 @@ import {
 } from "./utils";
 
 // TODO: Define daily cronjob that schedules personal push notification messages
+// TODO: Add moderation check
 
 // TODO: Handle receiving a new message while the previous message is still being processed
 export const getResponseToMessage = functions
@@ -55,6 +56,7 @@ export const getResponseToMessage = functions
         temperature: 0.75,
         frequency_penalty: 0.5,
         presence_penalty: 0.5,
+        user: userId,
         messages: [
           {
             role: "system",
@@ -139,6 +141,7 @@ export const getResponseToMessage = functions
         temperature: 0.75,
         frequency_penalty: 0.5,
         presence_penalty: 0.5,
+        user: userId,
         messages: [
           {
             role: "system",
