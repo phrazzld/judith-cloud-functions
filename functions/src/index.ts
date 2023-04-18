@@ -1,3 +1,4 @@
+import axios from "axios";
 import * as functions from "firebase-functions";
 import { PROMPTS } from "./prompts";
 import { ERROR_MESSAGES, STATUS_CODES } from "./constants";
@@ -10,6 +11,10 @@ import {
   searchEmbeddings,
   validateMessages,
 } from "./utils";
+
+const ELEVEN_LABS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech";
+/* const BELLA_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"; // Bella */
+const RACHEL_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel
 
 // TODO: Define daily cronjob that schedules personal push notification messages
 // TODO: Add moderation check
@@ -27,7 +32,6 @@ export const getResponseToMessage = functions
 
       // TODO: Clear scheduled push notifications for user
 
-      // TODO: Truncate total length of combined messages and system init to 2048 tokens
       // NOTE: This is currently handled on the client, but should be handled on the server as well
 
       // Get significance of last message
@@ -47,6 +51,7 @@ export const getResponseToMessage = functions
         embedding,
         significance: memorySignificance,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       // Reflect on current message context
@@ -125,13 +130,16 @@ export const getResponseToMessage = functions
           // Map relevantMemories to include similarity, the doc's memoryType, and the doc's memory
           triggeredMemories: relevantMemories
             .map(
-              (memory: { similarity: number; doc: any }) =>
-                `(${memory.similarity}) :: ${memory.doc.data().createdAt.toDate()} :: ${
-                  memory.doc.data().memoryType
-                }:\n${memory.doc.data().memory}`
+              (memory: { weightedScore: number; doc: any }) =>
+                `(${memory.weightedScore}) :: ${memory.doc
+                  .data()
+                  .createdAt.toDate()} :: ${memory.doc.data().memoryType}:\n${
+                  memory.doc.data().memory
+                }`
             )
             .join("\n\n###\n\n"),
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
       // Add memories to response context
@@ -155,7 +163,7 @@ export const getResponseToMessage = functions
 This reminds me of these memories:
 """
 ${relevantMemories
-  .map((memory: { similarity: number; doc: any }) => memory.doc.data())
+  .map((memory: { weightedScore: number; doc: any }) => memory.doc.data())
   .map(
     (memory: Memory) =>
       `${memory.createdAt.toDate()} :: ${memory.memoryType}:\n${memory.memory}`
@@ -197,10 +205,37 @@ ${relevantMemories
         embedding: judithMessageEmbedding,
         significance: judithResponseSignificance,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Record the chatResponse with Eleven Labs and upload it to Firebase Storage
+      const elevenLabsResponse = await axios.post(
+        `${ELEVEN_LABS_BASE_URL}/${RACHEL_VOICE_ID}`,
+        { text: chatResponse },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "xi-api-key": process.env.ELEVEN_LABS_API_KEY,
+          },
+          responseType: "arraybuffer",
+        }
+      );
+
+      const buffer = elevenLabsResponse.data;
+
+      // Save the audio file to Firebase Storage under a bucket for the user
+      const bucket = admin.storage().bucket();
+      const filename = `${userId}/${Date.now()}.mp3`;
+      const file = bucket.file(filename);
+      await file.save(buffer, {
+        metadata: {
+          contentType: "audio/mpeg",
+        },
       });
 
       response.status(200).send({
         response: chatResponse,
+        audioUrl: filename,
       });
     } catch (err: any) {
       handleError({

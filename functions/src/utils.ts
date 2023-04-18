@@ -1,7 +1,9 @@
+import * as admin from "firebase-admin";
 import * as functions from "firebase-functions";
 import { ERROR_MESSAGES, STATUS_CODES } from "./constants";
 import { firestore } from "./firebase";
 import { openaiClient } from "./openai";
+import { Memory } from "./types";
 
 interface HandleErrorParams {
   err: any;
@@ -68,6 +70,74 @@ export const validateMessages = (messages: any, response: any) => {
   return true;
 };
 
+const calculateWeightedScore = (
+  similarity: number,
+  significance: number,
+  lastAccessedAt: admin.firestore.Timestamp,
+  currentTime: admin.firestore.Timestamp,
+  timeDecayFactor: number,
+  significanceWeight: number,
+  similarityWeight: number
+): number => {
+  const timeElapsed = currentTime.toMillis() - lastAccessedAt.toMillis();
+  const timeDecay = Math.exp(-timeElapsed * timeDecayFactor);
+  return (
+    similarity * similarityWeight +
+    significance * significanceWeight * timeDecay
+  );
+};
+
+export const searchEmbeddings = async (
+  userId: string,
+  embedding: number[],
+  numResults: number,
+  timeDecayFactor = 1e-10,
+  significanceWeight = 0.5,
+  similarityWeight = 0.5
+) => {
+  if (significanceWeight + similarityWeight !== 1) {
+    throw new Error(
+      "The sum of significanceWeight and similarityWeight must be equal to 1."
+    );
+  }
+
+  const currentTime = admin.firestore.Timestamp.now();
+  const userRef = firestore.collection("users").doc(userId);
+  const memoryStream = await userRef.collection("memories").get();
+
+  const scores = memoryStream.docs.map((doc) => {
+    const {
+      embedding: memoryEmbedding,
+      significance,
+      lastAccessedAt,
+    } = doc.data() as Memory;
+    const similarity = cosineSimilarity(embedding, memoryEmbedding);
+    const weightedScore = calculateWeightedScore(
+      similarity,
+      significance,
+      lastAccessedAt || currentTime,
+      currentTime,
+      timeDecayFactor,
+      significanceWeight,
+      similarityWeight
+    );
+    return { weightedScore, doc };
+  });
+
+  const sortedScores = scores
+    .sort((a, b) => b.weightedScore - a.weightedScore)
+    .slice(0, numResults);
+
+  // Update lastAccessedAt for the documents in sortedScores
+  const updatePromises = sortedScores.map(({ doc }) => {
+    return doc.ref.update({ lastAccessedAt: currentTime });
+  });
+
+  await Promise.all(updatePromises);
+
+  return sortedScores;
+};
+
 const cosineSimilarity = (a: number[], b: number[]): number => {
   const dotProduct = a.reduce((sum, value, i) => sum + value * b[i], 0);
   const magnitudeA = Math.sqrt(
@@ -79,23 +149,23 @@ const cosineSimilarity = (a: number[], b: number[]): number => {
   return dotProduct / (magnitudeA * magnitudeB);
 };
 
-export const searchEmbeddings = async (
-  userId: string,
-  embedding: number[],
-  numResults: number
-) => {
-  const userRef = firestore.collection("users").doc(userId);
-  const memoryStream = await userRef.collection("memories").get();
-  const similarities = memoryStream.docs.map((doc) => {
-    const { embedding: memoryEmbedding } = doc.data();
-    const similarity = cosineSimilarity(embedding, memoryEmbedding);
-    return { similarity, doc };
-  });
-  const slicedSimilarities = similarities
-    .sort((a, b) => b.similarity - a.similarity)
-    .slice(0, numResults);
-  return slicedSimilarities;
-};
+/* export const searchEmbeddings = async ( */
+/*   userId: string, */
+/*   embedding: number[], */
+/*   numResults: number */
+/* ) => { */
+/*   const userRef = firestore.collection("users").doc(userId); */
+/*   const memoryStream = await userRef.collection("memories").get(); */
+/*   const similarities = memoryStream.docs.map((doc) => { */
+/*     const { embedding: memoryEmbedding } = doc.data(); */
+/*     const similarity = cosineSimilarity(embedding, memoryEmbedding); */
+/*     return { similarity, doc }; */
+/*   }); */
+/*   const slicedSimilarities = similarities */
+/*     .sort((a, b) => b.similarity - a.similarity) */
+/*     .slice(0, numResults); */
+/*   return slicedSimilarities; */
+/* }; */
 
 const validateMemory = (memory: any, response: any) => {
   if (!memory) {
@@ -155,7 +225,7 @@ export const getMemorySignificance = async (
           role: "system",
           content: `You are MemorySignificanceGPT. When given a memory, you respond with a number between 1 and 10 (inclusive) that classifies the significance of the memory. A 1 would indicate an almost totally insignificant memory, like someone saying "hello". A 10 would indicate a tremendously significant memory, like getting married or losing a loved one.
 
-The memories will always be a single message or an exchange of messages. You should focus on the significance of the user messages, and only use the assistant messages for context.
+The memories will always be a single message. You should focus on the significance of the user messages, and only use the assistant messages for context.
 
 Respond concisely. Never repeat the question or the memory, never clarify your classification. Always respond with just the number denoting the significance of the memory the user provided.`,
         },

@@ -7,8 +7,11 @@ const serviceAccount =
     ? prodServiceAccount
     : stagingServiceAccount;
 
+const bucketName = `${process.env.GCLOUD_PROJECT}.appspot.com`;
+
 firebaseAdmin.initializeApp({
   credential: firebaseAdmin.credential.cert(serviceAccount as any),
+  storageBucket: bucketName,
 });
 
 export const admin = firebaseAdmin;

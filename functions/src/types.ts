@@ -1,3 +1,4 @@
+import * as admin from 'firebase-admin'
 
 export interface OpenAIChatMessage {
   role: string;
@@ -21,6 +22,7 @@ export interface Memory {
   memoryType: "judithReflection" | "judithMessage" | "userMessage";
   memory: string;
   embedding: number[];
-  // TODO: Properly type createdAt
-  createdAt: any;
+  significance: number;
+  createdAt: admin.firestore.Timestamp;
+  lastAccessedAt: admin.firestore.Timestamp;
 }
