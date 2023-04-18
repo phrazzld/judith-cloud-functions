@@ -9,7 +9,7 @@ interface HandleErrorParams {
   err: any;
   statusCode: number;
   errorMessage: string;
-  response: any;
+  response: functions.Response | null;
 }
 
 export const handleError = (params: HandleErrorParams) => {
@@ -27,7 +27,7 @@ export const handleError = (params: HandleErrorParams) => {
   }
 };
 
-export const validateMessages = (messages: any, response: any) => {
+export const validateMessages = (messages: any, response: functions.Response) => {
   if (!messages) {
     handleError({
       err: ERROR_MESSAGES.MESSAGES_REQUIRED,
@@ -149,25 +149,7 @@ const cosineSimilarity = (a: number[], b: number[]): number => {
   return dotProduct / (magnitudeA * magnitudeB);
 };
 
-/* export const searchEmbeddings = async ( */
-/*   userId: string, */
-/*   embedding: number[], */
-/*   numResults: number */
-/* ) => { */
-/*   const userRef = firestore.collection("users").doc(userId); */
-/*   const memoryStream = await userRef.collection("memories").get(); */
-/*   const similarities = memoryStream.docs.map((doc) => { */
-/*     const { embedding: memoryEmbedding } = doc.data(); */
-/*     const similarity = cosineSimilarity(embedding, memoryEmbedding); */
-/*     return { similarity, doc }; */
-/*   }); */
-/*   const slicedSimilarities = similarities */
-/*     .sort((a, b) => b.similarity - a.similarity) */
-/*     .slice(0, numResults); */
-/*   return slicedSimilarities; */
-/* }; */
-
-const validateMemory = (memory: any, response: any) => {
+const validateMemory = (memory: any, response: functions.Response | null) => {
   if (!memory) {
     handleError({
       err: ERROR_MESSAGES.MEMORY_REQUIRED,
@@ -182,9 +164,9 @@ const validateMemory = (memory: any, response: any) => {
 };
 
 const validateMemorySignificance = (
-  memorySignificance: any,
+  memorySignificance: string | number,
   openaiResponse: any,
-  response: any
+  response: functions.Response | null
 ) => {
   if (Number.isNaN(memorySignificance)) {
     handleError({
