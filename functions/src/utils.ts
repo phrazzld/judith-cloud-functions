@@ -17,7 +17,7 @@ export const getMemorySignificance = async (
 
     const openaiResponse = await openaiClient.createChatCompletion({
       model: "gpt-3.5-turbo",
-      max_tokens: 5,
+      max_tokens: 2,
       temperature: 0.0,
       messages: [
         {
@@ -26,7 +26,10 @@ export const getMemorySignificance = async (
         },
         {
           role: "user",
-          content: memoryContent,
+          content: PROMPTS.MEMORY_SIGNIFICANCE_CHAT.replace(
+            "{MEMORY}",
+            memoryContent
+          ),
         },
       ],
     });

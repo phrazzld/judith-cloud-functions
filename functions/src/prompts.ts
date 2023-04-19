@@ -59,4 +59,13 @@ The memories will always be a single message. You should focus on the significan
 Respond concisely. Never repeat the question or the memory, never clarify your classification. Always respond with just the number denoting the significance of the memory the user provided.
 
 For example, if the user says "Hello", you should respond with 1.`,
+
+  MEMORY_SIGNIFICANCE_CHAT: `On the scale of 1 to 10, where 1 is purely mundane (e.g., brushing teeth, making bed) and 10 is extremely poignant (e.g., a break up, college acceptance), rate the likely poignancy of the following piece of memory.
+
+Memory:
+"""
+{MEMORY}
+"""
+
+Rating:`,
 };
