@@ -1,46 +1,22 @@
-import axios from "axios";
+import * as FirebaseAdmin from "firebase-admin";
 import * as functions from "firebase-functions";
-import { PROMPTS } from "./prompts";
-import { ERROR_MESSAGES, STATUS_CODES } from "./constants";
-import { admin, firestore } from "./firebase";
+import { ERROR_MESSAGES } from "./constants";
+import { getEmbedding, searchEmbeddings } from "./embeddings";
+import { admin } from "./firebase";
+import { createMemoryDocument, createMessageDocument } from "./firestore";
 import { openaiClient } from "./openai";
-import { Memory, OpenAIChatMessage } from "./types";
+import { PROMPTS } from "./prompts";
+import { Memory, Message } from "./types";
 import {
+  embedAndStoreMemory,
+  getJudithReflection,
   getMemorySignificance,
-  handleError,
-  searchEmbeddings,
-  validateMessages,
+  recordAndUploadAudio,
 } from "./utils";
-
-const ELEVEN_LABS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech";
-/* const BELLA_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"; // Bella */
-const RACHEL_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+import { validateMessages } from "./validation";
 
 // TODO: Define daily cronjob that schedules personal push notification messages
 // TODO: Add moderation check
-
-const embedAndStoreMemory = async (
-  userId: string,
-  memoryType: string,
-  memory: string,
-  significance: number | null
-) => {
-  const userRef = firestore.collection("users").doc(userId);
-  const embeddingResponse = await openaiClient.createEmbedding({
-    model: "text-embedding-ada-002",
-    input: memory,
-  });
-  const embedding = embeddingResponse.data.data[0].embedding;
-
-  await userRef.collection("memories").doc().set({
-    memoryType,
-    memory,
-    embedding,
-    significance,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-};
 
 // TODO: Handle receiving a new message while the previous message is still being processed
 export const getResponseToMessage = functions
@@ -50,85 +26,31 @@ export const getResponseToMessage = functions
       try {
         const { userId, messages, useAudio } = request.body;
         await admin.auth().getUser(userId);
-        const userRef = firestore.collection("users").doc(userId);
 
-        const isValid = validateMessages(messages, response);
-        if (!isValid) return;
+        validateMessages(messages);
 
         // TODO: Clear scheduled push notifications for user
 
         // Get significance of last message
+        // TODO: Make memory significance classification more robust so we get fewer nulls
         const memory = messages[messages.length - 1].content;
         const memorySignificance = await getMemorySignificance(memory);
 
         // Embed memory, store in memory stream
         await embedAndStoreMemory(
           userId,
-          "message",
+          "userMessage",
           memory,
           memorySignificance
         );
 
         // Reflect on current message context
-        const judithReflectionResponse =
-          await openaiClient.createChatCompletion({
-            model: "gpt-4",
-            max_tokens: 500,
-            temperature: 0.75,
-            frequency_penalty: 0.5,
-            presence_penalty: 0.5,
-            user: userId,
-            messages: [
-              {
-                role: "system",
-                content: PROMPTS.JUDITH_INNER_THOUGHTS_SYSTEM_INIT,
-              },
-              {
-                role: "user",
-                content: messages
-                  .map(
-                    (message: OpenAIChatMessage) =>
-                      `${message.role === "assistant" ? "Judith" : "User"}: ${
-                        message.content
-                      }`
-                  )
-                  .join("\n\n###\n\n"),
-              },
-            ],
-          });
-
-        if (judithReflectionResponse.status !== 200) {
-          handleError({
-            err: judithReflectionResponse,
-            statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-            errorMessage: ERROR_MESSAGES.OPENAI_ERROR,
-            response,
-          });
-          return;
-        }
-
-        const judithReflection =
-          judithReflectionResponse.data.choices[0].message?.content.trim();
-
+        const judithReflection = await getJudithReflection(userId, messages);
         // Embed reflection, store in memory stream
-        if (!judithReflection) {
-          handleError({
-            err: judithReflectionResponse,
-            statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-            errorMessage: ERROR_MESSAGES.OPENAI_ERROR,
-            response,
-          });
-          return;
-        }
         const judithReflectionSignificance = await getMemorySignificance(
           judithReflection
         );
-        const reflectionEmbeddingResponse = await openaiClient.createEmbedding({
-          model: "text-embedding-ada-002",
-          input: judithReflection,
-        });
-        const reflectionEmbedding =
-          reflectionEmbeddingResponse.data.data[0].embedding;
+        const reflectionEmbedding = await getEmbedding(judithReflection);
 
         // Search memory stream for memories similar to reflection
         const relevantMemories = await searchEmbeddings(
@@ -137,28 +59,38 @@ export const getResponseToMessage = functions
           3
         );
 
-        await userRef
-          .collection("memories")
-          .doc()
-          .set({
-            memoryType: "judithReflection",
-            memory: judithReflection,
-            embedding: reflectionEmbedding,
-            significance: judithReflectionSignificance,
-            // Map relevantMemories to include similarity, the doc's memoryType, and the doc's memory
-            triggeredMemories: relevantMemories
-              .map(
-                (memory: { weightedScore: number; doc: any }) =>
-                  `(${memory.weightedScore}) :: ${memory.doc
-                    .data()
-                    .createdAt.toDate()} :: ${memory.doc.data().memoryType}:\n${
-                    memory.doc.data().memory
-                  }`
-              )
-              .join("\n\n###\n\n"),
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+        const reflectionMemoryData: Memory = {
+          memoryType: "judithReflection",
+          memory: judithReflection,
+          embedding: reflectionEmbedding,
+          significance: judithReflectionSignificance,
+          // Map relevantMemories to include similarity, the doc's memoryType, and the doc's memory
+          triggeredMemories: relevantMemories
+            .map(
+              (memory: { weightedScore: number; doc: any }) =>
+                `(${memory.weightedScore}) :: ${memory.doc
+                  .data()
+                  .createdAt.toDate()} :: ${memory.doc.data().memoryType}:\n${
+                  memory.doc.data().memory
+                }`
+            )
+            .join("\n\n###\n\n"),
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        await createMemoryDocument(userId, reflectionMemoryData);
+
+        const formattedMemories = `${relevantMemories
+          .map((memory: { weightedScore: number; doc: any }) =>
+            memory.doc.data()
+          )
+          .map(
+            (memory: Memory) =>
+              `${(
+                memory.createdAt as FirebaseAdmin.firestore.Timestamp
+              ).toDate()} :: ${memory.memoryType}:\n${memory.memory}`
+          )
+          .join("\n\n###\n\n")}`;
 
         // Add memories to response context
         const openaiResponse = await openaiClient.createChatCompletion({
@@ -176,30 +108,18 @@ export const getResponseToMessage = functions
             ...messages,
             {
               role: "assistant",
-              content: `${judithReflection}
-
-This reminds me of these memories:
-"""
-${relevantMemories
-  .map((memory: { weightedScore: number; doc: any }) => memory.doc.data())
-  .map(
-    (memory: Memory) =>
-      `${memory.createdAt.toDate()} :: ${memory.memoryType}:\n${memory.memory}`
-  )
-  .join("\n\n###\n\n")}
-"""`,
+              content: PROMPTS.JUDITH_PERSONA_CHAT.replace(
+                "{REFLECTION}",
+                judithReflection
+              ).replace("{MEMORIES}", formattedMemories),
             },
           ],
         });
 
         if (openaiResponse.status !== 200) {
-          handleError({
-            err: openaiResponse,
-            statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-            errorMessage: ERROR_MESSAGES.OPENAI_ERROR,
-            response,
-          });
-          return;
+          console.error(openaiResponse.data);
+          functions.logger.error(openaiResponse.data);
+          throw new Error(ERROR_MESSAGES.OPENAI_ERROR);
         }
 
         const chatResponse =
@@ -209,74 +129,36 @@ ${relevantMemories
         const judithResponseSignificance = await getMemorySignificance(
           chatResponse
         );
-        const judithMessageEmbeddingResponse =
-          await openaiClient.createEmbedding({
-            model: "text-embedding-ada-002",
-            input: memory,
-          });
-        const judithMessageEmbedding =
-          judithMessageEmbeddingResponse.data.data[0].embedding;
-        await userRef.collection("memories").doc().set({
+        const judithMessageEmbedding = await getEmbedding(chatResponse);
+        const judithMessageMemoryData: Memory = {
           memoryType: "judithMessage",
           memory: chatResponse,
           embedding: judithMessageEmbedding,
           significance: judithResponseSignificance,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
           lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+        };
+        await createMemoryDocument(userId, judithMessageMemoryData);
+
+        const judithMessageData: Message = {
+          sender: "bot",
+          text: chatResponse,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        await createMessageDocument(userId, judithMessageData);
 
         let filename = null;
         if (useAudio) {
           filename = await recordAndUploadAudio(userId, chatResponse);
         }
 
-        response.status(200).send({
-          response: chatResponse,
-          audioUrl: filename,
-        });
+        response.status(200).send({ audioUrl: filename });
       } catch (err: any) {
-        handleError({
-          err,
-          statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-          errorMessage: ERROR_MESSAGES.GENERIC,
-          response,
+        console.error(err);
+        functions.logger.error(err);
+        response.status(500).send({
+          error: ERROR_MESSAGES.GENERIC,
         });
       }
     }
   );
-
-const recordAndUploadAudio = async (
-  userId: string,
-  text: string
-): Promise<string> => {
-  try {
-    const elevenLabsResponse = await axios.post(
-      `${ELEVEN_LABS_BASE_URL}/${RACHEL_VOICE_ID}`,
-      { text },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "xi-api-key": process.env.ELEVEN_LABS_API_KEY,
-        },
-        responseType: "arraybuffer",
-      }
-    );
-
-    const buffer = elevenLabsResponse.data;
-
-    // Save the audio file to Firebase Storage under a bucket for the user
-    const bucket = admin.storage().bucket();
-    const filename = `${userId}/${Date.now()}.mp3`;
-    const file = bucket.file(filename);
-    await file.save(buffer, {
-      metadata: {
-        contentType: "audio/mpeg",
-      },
-    });
-    return filename;
-  } catch (err: any) {
-    console.error(err);
-    functions.logger.error(err);
-    throw new Error("Error recording and uploading audio");
-  }
-};

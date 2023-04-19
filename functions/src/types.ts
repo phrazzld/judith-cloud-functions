@@ -1,4 +1,4 @@
-import * as admin from 'firebase-admin'
+import * as admin from "firebase-admin";
 
 export interface OpenAIChatMessage {
   role: string;
@@ -13,16 +13,25 @@ export interface OpenAIApiResponse {
         message: {
           content: string;
         };
-      },
+      }
     ];
   };
 }
 
+export type MemoryType = "judithReflection" | "judithMessage" | "userMessage";
+
+export interface Message {
+  sender: "user" | "bot";
+  text: string;
+  createdAt: admin.firestore.Timestamp | admin.firestore.FieldValue;
+}
+
 export interface Memory {
-  memoryType: "judithReflection" | "judithMessage" | "userMessage";
+  memoryType: MemoryType;
   memory: string;
   embedding: number[];
-  significance: number;
-  createdAt: admin.firestore.Timestamp;
-  lastAccessedAt: admin.firestore.Timestamp;
+  significance: number | null;
+  triggeredMemories?: string;
+  createdAt: admin.firestore.Timestamp | admin.firestore.FieldValue;
+  lastAccessedAt: admin.firestore.Timestamp | admin.firestore.FieldValue;
 }

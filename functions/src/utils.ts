@@ -1,219 +1,32 @@
+import axios from "axios";
 import * as admin from "firebase-admin";
 import * as functions from "firebase-functions";
-import { ERROR_MESSAGES, STATUS_CODES } from "./constants";
-import { firestore } from "./firebase";
+import { ELEVEN_LABS_BASE_URL, ERROR_MESSAGES, VOICE_ID } from "./constants";
+import { getEmbedding } from "./embeddings";
+import { createMemoryDocument } from "./firestore";
 import { openaiClient } from "./openai";
-import { Memory } from "./types";
-
-interface HandleErrorParams {
-  err: any;
-  statusCode: number;
-  errorMessage: string;
-  response: functions.Response | null;
-}
-
-export const handleError = (params: HandleErrorParams) => {
-  const { err, statusCode, errorMessage, response } = params;
-  // Validate presence of all params
-  if (!err || !statusCode || !errorMessage) {
-    throw new Error("handleError requires all params to be present");
-  }
-
-  console.error(err);
-  functions.logger.error(err);
-
-  if (response) {
-    response.status(statusCode).send({ error: errorMessage });
-  }
-};
-
-export const validateMessages = (messages: any, response: functions.Response) => {
-  if (!messages) {
-    handleError({
-      err: ERROR_MESSAGES.MESSAGES_REQUIRED,
-      statusCode: STATUS_CODES.BAD_REQUEST,
-      errorMessage: ERROR_MESSAGES.MESSAGES_REQUIRED,
-      response,
-    });
-    return false;
-  }
-
-  // Validate that messages is an array of objects with a role and content
-  if (!Array.isArray(messages)) {
-    handleError({
-      err: ERROR_MESSAGES.MESSAGES_ARRAY,
-      statusCode: STATUS_CODES.BAD_REQUEST,
-      errorMessage: ERROR_MESSAGES.MESSAGES_ARRAY,
-      response,
-    });
-    return false;
-  }
-
-  for (const message of messages) {
-    if (
-      typeof message !== "object" ||
-      !message.role ||
-      !message.content ||
-      typeof message.role !== "string" ||
-      typeof message.content !== "string"
-    ) {
-      handleError({
-        err: ERROR_MESSAGES.MESSAGES_OBJECTS,
-        statusCode: STATUS_CODES.BAD_REQUEST,
-        errorMessage: ERROR_MESSAGES.MESSAGES_OBJECTS,
-        response,
-      });
-      return;
-    }
-  }
-
-  return true;
-};
-
-const calculateWeightedScore = (
-  similarity: number,
-  significance: number,
-  lastAccessedAt: admin.firestore.Timestamp,
-  currentTime: admin.firestore.Timestamp,
-  timeDecayFactor: number,
-  significanceWeight: number,
-  similarityWeight: number
-): number => {
-  const timeElapsed = currentTime.toMillis() - lastAccessedAt.toMillis();
-  const timeDecay = Math.exp(-timeElapsed * timeDecayFactor);
-  return (
-    similarity * similarityWeight +
-    significance * significanceWeight * timeDecay
-  );
-};
-
-export const searchEmbeddings = async (
-  userId: string,
-  embedding: number[],
-  numResults: number,
-  timeDecayFactor = 1e-10,
-  significanceWeight = 0.5,
-  similarityWeight = 0.5
-) => {
-  if (significanceWeight + similarityWeight !== 1) {
-    throw new Error(
-      "The sum of significanceWeight and similarityWeight must be equal to 1."
-    );
-  }
-
-  const currentTime = admin.firestore.Timestamp.now();
-  const userRef = firestore.collection("users").doc(userId);
-  const memoryStream = await userRef.collection("memories").get();
-
-  const scores = memoryStream.docs.map((doc) => {
-    const {
-      embedding: memoryEmbedding,
-      significance,
-      lastAccessedAt,
-    } = doc.data() as Memory;
-    const similarity = cosineSimilarity(embedding, memoryEmbedding);
-    const weightedScore = calculateWeightedScore(
-      similarity,
-      significance,
-      lastAccessedAt || currentTime,
-      currentTime,
-      timeDecayFactor,
-      significanceWeight,
-      similarityWeight
-    );
-    return { weightedScore, doc };
-  });
-
-  const sortedScores = scores
-    .sort((a, b) => b.weightedScore - a.weightedScore)
-    .slice(0, numResults);
-
-  // Update lastAccessedAt for the documents in sortedScores
-  const updatePromises = sortedScores.map(({ doc }) => {
-    return doc.ref.update({ lastAccessedAt: currentTime });
-  });
-
-  await Promise.all(updatePromises);
-
-  return sortedScores;
-};
-
-const cosineSimilarity = (a: number[], b: number[]): number => {
-  const dotProduct = a.reduce((sum, value, i) => sum + value * b[i], 0);
-  const magnitudeA = Math.sqrt(
-    a.reduce((sum, value) => sum + value * value, 0)
-  );
-  const magnitudeB = Math.sqrt(
-    b.reduce((sum, value) => sum + value * value, 0)
-  );
-  return dotProduct / (magnitudeA * magnitudeB);
-};
-
-const validateMemory = (memory: any, response: functions.Response | null) => {
-  if (!memory) {
-    handleError({
-      err: ERROR_MESSAGES.MEMORY_REQUIRED,
-      statusCode: STATUS_CODES.BAD_REQUEST,
-      errorMessage: ERROR_MESSAGES.MEMORY_REQUIRED,
-      response,
-    });
-    return false;
-  }
-
-  return true;
-};
-
-const validateMemorySignificance = (
-  memorySignificance: string | number,
-  openaiResponse: any,
-  response: functions.Response | null
-) => {
-  if (Number.isNaN(memorySignificance)) {
-    handleError({
-      err: openaiResponse,
-      statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-      errorMessage: `OpenAI API returned a non-numeric response: ${memorySignificance}`,
-      response,
-    });
-    return false;
-  }
-
-  if (memorySignificance < 1 || memorySignificance > 10) {
-    handleError({
-      err: openaiResponse,
-      statusCode: STATUS_CODES.INTERNAL_SERVER_ERROR,
-      errorMessage: `OpenAI API returned a number outside of the range 1-10: ${memorySignificance}`,
-      response,
-    });
-    return false;
-  }
-
-  return true;
-};
+import { PROMPTS } from "./prompts";
+import { Memory, MemoryType, OpenAIChatMessage } from "./types";
+import { validateMemory, validateMemorySignificance } from "./validation";
 
 export const getMemorySignificance = async (
-  memory: string
+  memoryContent: string
 ): Promise<number | null> => {
   try {
-    const isValid = validateMemory(memory, null);
-    if (!isValid) return null;
+    validateMemory(memoryContent);
 
     const openaiResponse = await openaiClient.createChatCompletion({
       model: "gpt-3.5-turbo",
-      max_tokens: 10,
+      max_tokens: 5,
       temperature: 0.0,
       messages: [
         {
           role: "system",
-          content: `You are MemorySignificanceGPT. When given a memory, you respond with a number between 1 and 10 (inclusive) that classifies the significance of the memory. A 1 would indicate an almost totally insignificant memory, like someone saying "hello". A 10 would indicate a tremendously significant memory, like getting married or losing a loved one.
-
-The memories will always be a single message. You should focus on the significance of the user messages, and only use the assistant messages for context.
-
-Respond concisely. Never repeat the question or the memory, never clarify your classification. Always respond with just the number denoting the significance of the memory the user provided.`,
+          content: PROMPTS.MEMORY_SIGNIFICANCE_SYSTEM_INIT,
         },
         {
           role: "user",
-          content: memory,
+          content: memoryContent,
         },
       ],
     });
@@ -221,7 +34,7 @@ Respond concisely. Never repeat the question or the memory, never clarify your c
     if (openaiResponse.status !== 200) {
       console.error(openaiResponse);
       functions.logger.error(openaiResponse);
-      return null;
+      throw new Error(ERROR_MESSAGES.OPENAI_ERROR);
     }
 
     // Validate that the response is a number between 1 and 10
@@ -229,17 +42,120 @@ Respond concisely. Never repeat the question or the memory, never clarify your c
       openaiResponse.data.choices[0].message?.content.trim()
     );
 
-    const isValidMemorySignificance = validateMemorySignificance(
-      memorySignificance,
-      openaiResponse,
-      null
-    );
-    if (!isValidMemorySignificance) return null;
+    validateMemorySignificance(memorySignificance);
 
     return memorySignificance;
   } catch (err: any) {
     console.error(err);
     functions.logger.error(err);
-    return null;
+    throw new Error("Error getting memory significance.");
+  }
+};
+
+export const embedAndStoreMemory = async (
+  userId: string,
+  memoryType: MemoryType,
+  memoryContent: string,
+  significance: number | null
+) => {
+  try {
+    const embedding = await getEmbedding(memoryContent);
+
+    const memoryData: Memory = {
+      memoryType,
+      memory: memoryContent,
+      embedding,
+      significance,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastAccessedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await createMemoryDocument(userId, memoryData);
+  } catch (err: any) {
+    console.error(err);
+    functions.logger.error(err);
+    throw new Error("Error embedding and storing memory");
+  }
+};
+
+export const getJudithReflection = async (
+  userId: string,
+  messages: any[]
+): Promise<string> => {
+  try {
+    const judithReflectionResponse = await openaiClient.createChatCompletion({
+      model: "gpt-4",
+      max_tokens: 500,
+      temperature: 0.75,
+      frequency_penalty: 0.5,
+      presence_penalty: 0.5,
+      user: userId,
+      messages: [
+        {
+          role: "system",
+          content: PROMPTS.JUDITH_INNER_THOUGHTS_SYSTEM_INIT,
+        },
+        {
+          role: "user",
+          content: messages
+            .map(
+              (message: OpenAIChatMessage) =>
+                `${message.role === "assistant" ? "Judith" : "User"}: ${
+                  message.content
+                }`
+            )
+            .join("\n\n###\n\n"),
+        },
+      ],
+    });
+
+    if (judithReflectionResponse.status !== 200) {
+      throw new Error("Error getting Judith reflection");
+    }
+
+    const judithReflection =
+      judithReflectionResponse.data.choices[0].message?.content.trim() || "";
+
+    return judithReflection;
+  } catch (err: any) {
+    console.error(err);
+    functions.logger.error(err);
+    throw new Error("Error getting and storing Judith reflection");
+  }
+};
+
+export const recordAndUploadAudio = async (
+  userId: string,
+  text: string
+): Promise<string> => {
+  try {
+    const elevenLabsResponse = await axios.post(
+      `${ELEVEN_LABS_BASE_URL}/${VOICE_ID}`,
+      { text },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": process.env.ELEVEN_LABS_API_KEY,
+        },
+        responseType: "arraybuffer",
+      }
+    );
+
+    const buffer = elevenLabsResponse.data;
+
+    // Save the audio file to Firebase Storage under a bucket for the user
+    const bucket = admin.storage().bucket();
+    const filename = `${userId}/${Date.now()}.mp3`;
+    const file = bucket.file(filename);
+    await file.save(buffer, {
+      metadata: {
+        contentType: "audio/mpeg",
+      },
+    });
+    return filename;
+  } catch (err: any) {
+    console.error(err);
+    functions.logger.error(err);
+    throw new Error("Error recording and uploading audio");
   }
 };
