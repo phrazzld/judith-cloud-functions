@@ -16,3 +16,5 @@ export const ERROR_MESSAGES = {
 export const ELEVEN_LABS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech";
 export const VOICE_ID = "EXAVITQu4vr4xnSDxMaL"; // Bella
 /* const VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel */
+
+export const DEFAULT_MEMORY_SIGNIFICANCE = 3;

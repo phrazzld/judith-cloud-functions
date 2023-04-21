@@ -1,7 +1,12 @@
 import axios from "axios";
 import * as admin from "firebase-admin";
 import * as functions from "firebase-functions";
-import { ELEVEN_LABS_BASE_URL, ERROR_MESSAGES, VOICE_ID } from "./constants";
+import {
+  DEFAULT_MEMORY_SIGNIFICANCE,
+  ELEVEN_LABS_BASE_URL,
+  ERROR_MESSAGES,
+  VOICE_ID,
+} from "./constants";
 import { getEmbedding } from "./embeddings";
 import { createMemoryDocument } from "./firestore";
 import { openaiClient } from "./openai";
@@ -41,11 +46,16 @@ export const getMemorySignificance = async (
     }
 
     // Validate that the response is a number between 1 and 10
-    const memorySignificance = Number(
-      openaiResponse.data.choices[0].message?.content.trim()
+    let memorySignificance = parseInt(
+      openaiResponse.data.choices[0].message?.content.trim() || "",
+      10
     );
 
-    validateMemorySignificance(memorySignificance);
+    const isValid = validateMemorySignificance(memorySignificance);
+
+    if (!isValid) {
+      memorySignificance = DEFAULT_MEMORY_SIGNIFICANCE;
+    }
 
     return memorySignificance;
   } catch (err: any) {

@@ -32,16 +32,20 @@ export const validateMemory = (memoryContent: string): void => {
 
 export const validateMemorySignificance = (
   memorySignificance: string | number
-): void => {
+): boolean => {
   if (Number.isNaN(memorySignificance)) {
-    throw new Error(
+    console.warn(
       `OpenAI API returned a non-numeric response: ${memorySignificance}`
     );
+    return false;
   }
 
   if (memorySignificance < 1 || memorySignificance > 10) {
-    throw new Error(
+    console.warn(
       `OpenAI API returned a number outside of the range 1-10: ${memorySignificance}`
     );
+    return false;
   }
+
+  return true;
 };
